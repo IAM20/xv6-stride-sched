@@ -34,6 +34,13 @@ struct context {
 
 enum procstate { UNUSED, EMBRYO, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+struct stride_info
+{
+  int stride;           // Stride value of the process
+  int tickets;          // Tickets given to the process
+  long long pass_value; // Pass value of the process
+};
+
 // Per-process state
 struct proc {
   uint sz;                     // Size of process memory (bytes)
@@ -49,7 +56,40 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+
+  /* For runnable queue */
+  int is_in_runnable_queue;
+
+  /* For waiting queue */
+  struct proc * next;
+  struct proc * prev;
+
+  /* stride scheduling */
+  struct stride_info stride_info;
 };
+
+struct waiting_q {
+  uint size;
+  struct proc * head;
+  struct proc * tail;
+};
+
+struct proc *remove_min();
+void update_pass_value(struct proc *proc);
+void update_min_pass_value();
+void assign_min_pass_value(struct proc *proc);
+void assign_tickets(int tickets);
+void initialize_stride_info(struct proc *proc);
+
+/* For runnable queue */
+void heapify(struct proc *queue[], int size, int start_index);
+int insert_proc(struct proc *queue[], int size, struct proc *proc);
+struct proc *pop(struct proc *queue[], int size);
+int delete_proc(struct proc *queue[], int delete_index, int size);
+
+/* For idle queue */
+void insert_waiting_queue(struct waiting_q *q, struct proc *p);
+void delete_proc_in_wq(struct waiting_q *q, struct proc *p);
 
 // Process memory is laid out contiguously, low addresses first:
 //   text

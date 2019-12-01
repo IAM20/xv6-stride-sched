@@ -89,3 +89,14 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+int
+sys_stride(void)
+{
+  int n;
+  if(argint(0, &n) < 0)
+    return -1;
+
+  assign_tickets(n);
+  return 0;
+}

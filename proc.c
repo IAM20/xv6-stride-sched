@@ -7,9 +7,22 @@
 #include "proc.h"
 #include "spinlock.h"
 
+#define LARGE_NUMBER 10000
+#define NULL 0
+#define TRUE 1
+#define FALSE 0
+
 struct {
   struct spinlock lock;
   struct proc proc[NPROC];
+  struct proc *runnable_queue[NPROC];
+  struct waiting_q wq;
+  /* Idle queue must be linked list queue. */
+
+  int queue_size;
+  int wait_proc_number;
+  int large_number;
+  long long min_pass_value;
 } ptable;
 
 static struct proc *initproc;
@@ -20,13 +33,85 @@ extern void trapret(void);
 
 static void wakeup1(void *chan);
 
+struct proc *
+remove_min()
+{
+  struct proc *result = pop(ptable.runnable_queue, ptable.queue_size--);
+
+  if (result != NULL && RUNNABLE != result->state) {
+    insert_waiting_queue(&ptable.wq, result);
+    return NULL;
+  }
+
+  if (ptable.queue_size < 0) {
+    ptable.queue_size = 0;
+  }
+
+  return result;
+}
+
+void
+update_pass_value(struct proc *p)
+{
+  long long result = p->stride_info.pass_value + p->stride_info.stride;
+  /* Overflow has been occured */
+  if (result < 0) {
+    for (int i = 1; i <= ptable.queue_size; i++) {
+      ptable.runnable_queue[i]->stride_info.pass_value -= p->stride_info.pass_value;
+    }
+    result = p->stride_info.stride;
+  }
+  p->stride_info.pass_value = result;
+}
+
+void
+update_min_pass_value()
+{
+  if (ptable.queue_size == 0) {
+    ptable.min_pass_value = 0;
+    return;
+  }
+  ptable.min_pass_value = ptable.runnable_queue[1]->stride_info.pass_value;
+}
+
+void
+assign_min_pass_value(struct proc *p)
+{
+  p->stride_info.pass_value = ptable.min_pass_value;
+}
+
+void
+assign_stride_info(struct proc *p, int tickets)
+{
+  p->stride_info.tickets = tickets;
+  p->stride_info.stride = LARGE_NUMBER / tickets;
+  p->stride_info.pass_value = ptable.min_pass_value;
+}
+
+void
+assign_tickets(int tickets)
+{
+  assign_stride_info(myproc(), tickets);
+}
+
+void
+initialize_stride_info(struct proc *p)
+{
+  assign_stride_info(p, 100);
+}
+
 void
 pinit(void)
 {
   initlock(&ptable.lock, "ptable");
+  ptable.large_number = LARGE_NUMBER;
+  ptable.wq.head = ptable.wq.tail = NULL;
+  ptable.wq.size = 0;
+  ptable.queue_size = 0;
 }
 
 // Must be called with interrupts disabled
+
 int
 cpuid() {
   return mycpu()-cpus;
@@ -88,6 +173,9 @@ allocproc(void)
 found:
   p->state = EMBRYO;
   p->pid = nextpid++;
+  p->is_in_runnable_queue = FALSE;
+  initialize_stride_info(p);
+  p->next = p->prev = NULL;
 
   release(&ptable.lock);
 
@@ -149,6 +237,7 @@ userinit(void)
   acquire(&ptable.lock);
 
   p->state = RUNNABLE;
+  insert_proc(ptable.runnable_queue, ptable.queue_size++, p);
 
   release(&ptable.lock);
 }
@@ -198,6 +287,7 @@ fork(void)
   }
   np->sz = curproc->sz;
   np->parent = curproc;
+  np->is_in_runnable_queue = FALSE;
   *np->tf = *curproc->tf;
 
   // Clear %eax so that fork returns 0 in the child.
@@ -215,6 +305,8 @@ fork(void)
   acquire(&ptable.lock);
 
   np->state = RUNNABLE;
+  assign_min_pass_value(np);
+  insert_proc(ptable.runnable_queue, ptable.queue_size++, np);
 
   release(&ptable.lock);
 
@@ -295,6 +387,7 @@ wait(void)
         p->name[0] = 0;
         p->killed = 0;
         p->state = UNUSED;
+        delete_proc_in_wq(&ptable.wq, p);
         release(&ptable.lock);
         return pid;
       }
@@ -332,26 +425,23 @@ scheduler(void)
 
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
-    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-      if(p->state != RUNNABLE)
-        continue;
 
-      // Switch to chosen process.  It is the process's job
-      // to release ptable.lock and then reacquire it
-      // before jumping back to us.
-      c->proc = p;
+    p = remove_min();
+    if (p != NULL) {
+      c ->proc = p;
       switchuvm(p);
       p->state = RUNNING;
 
       swtch(&(c->scheduler), p->context);
       switchkvm();
 
-      // Process is done running for now.
-      // It should have changed its p->state before coming back.
+      update_pass_value(p);
+      if (RUNNABLE == p->state)
+        insert_proc(ptable.runnable_queue, ptable.queue_size++, p);
+      update_min_pass_value();
       c->proc = 0;
     }
     release(&ptable.lock);
-
   }
 }
 
@@ -386,7 +476,10 @@ void
 yield(void)
 {
   acquire(&ptable.lock);  //DOC: yieldlock
-  myproc()->state = RUNNABLE;
+  struct proc *p = myproc();
+  delete_proc_in_wq(&ptable.wq, p);
+  p->state = RUNNABLE;
+  insert_proc(ptable.runnable_queue, ptable.queue_size++, p);
   sched();
   release(&ptable.lock);
 }
@@ -460,8 +553,12 @@ wakeup1(void *chan)
   struct proc *p;
 
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
-    if(p->state == SLEEPING && p->chan == chan)
+    if(p->state == SLEEPING && p->chan == chan) {
       p->state = RUNNABLE;
+      delete_proc_in_wq(&ptable.wq, p);
+      assign_min_pass_value(p);
+      insert_proc(ptable.runnable_queue, ptable.queue_size++, p);
+    }
 }
 
 // Wake up all processes sleeping on chan.
@@ -486,8 +583,11 @@ kill(int pid)
     if(p->pid == pid){
       p->killed = 1;
       // Wake process from sleep if necessary.
-      if(p->state == SLEEPING)
+      if(p->state == SLEEPING) {
         p->state = RUNNABLE;
+        delete_proc_in_wq(&ptable.wq, p);
+        insert_proc(ptable.runnable_queue, ptable.queue_size++, p);
+      }
       release(&ptable.lock);
       return 0;
     }
@@ -531,4 +631,134 @@ procdump(void)
     }
     cprintf("\n");
   }
+}
+
+/* For runnable queue (Priority queue) */
+void
+heapify(struct proc *queue[], int size, int start_index)
+{
+  if (size == 0) {
+    return;
+  }
+  if (size == NPROC) {
+    panic("Heap size is full\n");
+  }
+
+  int i, left, right, min;
+  for (i = start_index; i <= size; i = min) {
+    left = i * 2;
+    right = i * 2 + 1;
+    min = i;
+
+    if (left <= size && queue[left]->stride_info.pass_value < queue[min]->stride_info.pass_value) {
+      min = left;
+    }
+
+    if (right <= size && queue[right]->stride_info.pass_value < queue[min]->stride_info.pass_value) {
+      min = right;
+    }
+
+    if (i != min) {
+      struct proc *tmp = queue[i];
+      queue[i] = queue[min];
+      queue[min] = tmp;
+    } else {
+      break;
+    }
+  }
+}
+
+int
+insert_proc(struct proc *queue[], int size, struct proc *proc) {
+  if (proc->is_in_runnable_queue == TRUE) {
+    ptable.queue_size--;
+    return size;
+  }
+  proc->is_in_runnable_queue = TRUE;
+  queue[++size] = proc;
+  int i = size;
+  while (i > 1) {
+    int parent = i / 2;
+    if (queue[i]->stride_info.pass_value < queue[parent]->stride_info.pass_value) {
+      struct proc *tmp = queue[parent];
+      queue[parent] = queue[i];
+      queue[i] = tmp;
+    } else {
+      break;
+    }
+    i = parent;
+  }
+  return size;
+}
+
+struct proc * pop(struct proc *queue[], int size) {
+  if (size == 0) {
+    return NULL;
+  }
+  struct proc *result = queue[1];
+  result->is_in_runnable_queue = FALSE;
+  delete_proc(queue, 1, size);
+  return result;
+}
+
+int delete_proc(struct proc *queue[], int delete_index, int size)
+{
+  if (size == 0 || delete_index > size || delete_index == 0) {
+    return 0;
+  }
+
+  queue[delete_index] = queue[size];
+  queue[size] = NULL;
+  heapify(queue, --size, delete_index);
+
+  return size;
+}
+
+/* For idle queue */
+void insert_waiting_queue(struct waiting_q *q, struct proc *p)
+{
+  if (p->next != NULL) {
+    return;
+  }
+
+  if (q->size == 0) {
+    q->head = q->tail = p;
+    p->next = p->prev = p;
+    q->size++;
+    return;
+  }
+
+  q->tail->next = p;
+  p->next = q->head;
+  p->prev = q->tail;
+  q->head->prev = p;
+
+  q->tail = p;
+  q->size++;
+}
+
+void delete_proc_in_wq(struct waiting_q *q, struct proc *p)
+{
+  if (p->next == NULL) {
+    return;
+  }
+
+  if (q->size == 1) {
+    q->tail = q->head = NULL;
+    p->next = p->prev = NULL;
+    q->size = 0;
+    return;
+  }
+
+  p->prev->next = p->next;
+  p->next->prev = p->prev;
+
+  if (q->head == p) {
+    q->head = p->next;
+  } else if (q->tail == p) {
+    q->tail = p->prev;
+  }
+
+  p->prev = p->next = NULL;
+  q->size--;
 }
