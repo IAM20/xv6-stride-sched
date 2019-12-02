@@ -691,7 +691,8 @@ insert_proc(struct proc *queue[], int size, struct proc *proc) {
   return size;
 }
 
-struct proc * pop(struct proc *queue[], int size) {
+struct proc *
+pop(struct proc *queue[], int size) {
   if (size == 0) {
     return NULL;
   }
@@ -701,7 +702,8 @@ struct proc * pop(struct proc *queue[], int size) {
   return result;
 }
 
-int delete_proc(struct proc *queue[], int delete_index, int size)
+int
+delete_proc(struct proc *queue[], int delete_index, int size)
 {
   if (size == 0 || delete_index > size || delete_index == 0) {
     return 0;
@@ -715,7 +717,8 @@ int delete_proc(struct proc *queue[], int delete_index, int size)
 }
 
 /* For idle queue */
-void insert_waiting_queue(struct waiting_q *q, struct proc *p)
+void
+insert_waiting_queue(struct waiting_q *q, struct proc *p)
 {
   if (p->next != NULL) {
     return;
@@ -737,7 +740,8 @@ void insert_waiting_queue(struct waiting_q *q, struct proc *p)
   q->size++;
 }
 
-void delete_proc_in_wq(struct waiting_q *q, struct proc *p)
+void
+delete_proc_in_wq(struct waiting_q *q, struct proc *p)
 {
   if (p->next == NULL) {
     return;
