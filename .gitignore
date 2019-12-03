@@ -17,4 +17,5 @@ mkfs
 
 # IDE
 .idea/
+.DS_Store
 *.json
